@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "runner": {
+      "commandName": "Project",
+      "commandLineArgs": "\"http://worosoft.space/citizen/endpoint/\"   \"C:\\tools\\ngrok\""
+    }
+  }
+}
