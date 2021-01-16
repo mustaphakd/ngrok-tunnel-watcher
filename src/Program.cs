@@ -2,50 +2,88 @@
 using Newtonsoft.Json.Converters;
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using System.CommandLine;
+using System.CommandLine.Invocation;
 using System.Dynamic;
+using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
 
 namespace runner
 {
     //./runner.exe "http://worosoft.space/citizen/endpoint/"   "C:\tools\ngrok\ngrok.exe"
-    // load from Env variables
     class Program
     {
         private static readonly HttpClient client = new HttpClient();
 
+        const string ENVNGROK = "NGROK_HOME";
+        const string requiredNgrokFullpath = "ngrok tunel watcher expects to find full installation of ngrok in a user defined environment variable named: " + Program.ENVNGROK;
+
+        private static bool sigIntRaised = false;
+
         static void Main(string[] args)
         {
-            var argsLength = args.Length;
-            string[] commands;
 
-            if (argsLength < 2)
+            var rootCommand = new RootCommand
             {
-                Console.WriteLine("runner {serverUrl} {ngrokFullPath} [port]");
-                return;
-            }
+                new Option<string>(
+                    "--remote-url",
+                    description: "Remote endpoint to send updated ngrok address"),
+                new Option<FileInfo>(
+                    "--path",
+                    description: "Full path to ngrok executable",
+                    getDefaultValue: () => new FileInfo(Environment.GetEnvironmentVariable(Program.ENVNGROK))),
+                new Option<string>(
+                    "--action",
+                    description: "Parameters to pass on to ngrok e.g: http 8080 or start someConfigSectionFromNgrok.yaml ",
+                    getDefaultValue: () => " start --all")
+            };
 
-            var port = argsLength == 3 ? args[2] : "5000";
-            var serverUrl = args[0];
-            var ngrokCommand = args[1];
+            rootCommand.Description = $"ngrok tunnel watcher launches and periodically restarts ngrok executable.  It will update remote enpoint with your local ngrok address on every start.";
 
-            Console.WriteLine($"You provided serverulr: {serverUrl} \n\tngrok: {ngrokCommand}");
 
+
+
+            // Note that the parameters of the handler method are matched according to the names of the options
+            rootCommand.Handler = CommandHandler.Create<string, FileInfo, string>((remoteUrl, executable, executableArguments) =>
+            {
+                Console.WriteLine($"The value for --remote-url is: {remoteUrl}");
+                Console.WriteLine($"The value for --path is: {executable?.FullName ?? "null"}");
+                Console.WriteLine($"The value for --action is: {executableArguments}");
+
+                var processRunner = Program.GetProcessRunner();
+                WathcTunnel(processRunner, remoteUrl, executable.FullName, executableArguments);
+            });
 
 
             //intercept kill signal and cleanup
-            System.Threading.Thread thread = new System.Threading.Thread((dynamic arg) =>
+            Console.CancelKeyPress += (_, ea) =>
             {
-                var param = arg.command;
-                var cmd = arg.arguments;
+                // do not kill process
+                ea.Cancel = true;
 
-                RunCommand(param, cmd);
-            });
+                Console.WriteLine(" SIGINT .  Did you press Ctrl+C ?? " + ea.SpecialKey);
+                Program.sigIntRaised = true;
+            };
 
-            while(true)
+            AppDomain.CurrentDomain.ProcessExit += (source, e) =>
             {
-               // thread.Start(new { command = $"cd {ngrokCommand}", arguments = $" && ngrok  http {port}" });
+                Console.WriteLine(" SIGTERM .  Did you use TaskManager ??");
+                Program.sigIntRaised = true;
+            };
+
+            // Parse the incoming args and invoke the handler
+            rootCommand.InvokeAsync(args).Wait();
+        }
+
+
+        static void WathcTunnel(System.Threading.Thread thread, string remoteEndpoint, string ngrokFullPath, string ngrokCommand)
+        {
+            Console.WriteLine($"You provided serverulr: {remoteEndpoint} \n\tngrok: {ngrokCommand}");
+
+            while (Program.sigIntRaised == false)
+            {
+                // thread.Start(new { command = $"cd {ngrokCommand}", arguments = $" && ngrok  http {port}" });
                 thread.Start(new { command = $"cd {ngrokCommand}", arguments = $" && ngrok  start --all" });
                 //thread.Start(new { command = $"cd {ngrokCommand}", arguments = $" && ngrok  start nginxhttp" });
                 System.Threading.Thread.Sleep(16000);
@@ -69,7 +107,7 @@ namespace runner
                     Console.WriteLine(tunnel);
                     var url = tunnel.public_url as string;
 
-                    if(url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                    if (url.StartsWith("http", StringComparison.OrdinalIgnoreCase))
                     {
                         publicUrl = url;
                         break;
@@ -79,13 +117,27 @@ namespace runner
 
 
                 client.DefaultRequestHeaders.Add("User-Agent", "PostmanRuntime/8.0.0");
-                json = client.GetStringAsync($"{serverUrl}?link={publicUrl}").GetAwaiter().GetResult();
+                json = client.GetStringAsync($"{remoteEndpoint}?link={publicUrl}").GetAwaiter().GetResult();
 
                 var full_time = 1000 * 3600 * 7;
                 System.Threading.Thread.Sleep(full_time);
                 RunCommand("taskkill", "/f /im ngrok.exe");
                 System.Threading.Thread.Sleep(10_000);
             }
+
+        }
+
+        static System.Threading.Thread GetProcessRunner()
+        {
+            System.Threading.Thread thread = new System.Threading.Thread((dynamic arg) =>
+            {
+                var param = arg.command;
+                var cmd = arg.arguments;
+
+                RunCommand(param, cmd);
+            });
+
+            return thread;
         }
 
         static void RunCommand(string path, string command, bool wait = false)
